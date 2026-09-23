@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getYahooClient, withTimeout } from "@/lib/yahoo";
 
 export const runtime = "nodejs";
 
@@ -51,15 +52,10 @@ export async function GET(request: NextRequest) {
   const symbol = request.nextUrl.searchParams.get("symbol") ?? "SPY";
 
   try {
-    const { default: YahooFinance } = require("yahoo-finance2");
-    const yf: { search: (q: string, opts: Record<string, unknown>) => Promise<Record<string, unknown>> } = new YahooFinance({
-      suppressNotices: ["yahooSurvey", "ripHistorical"],
-    });
-
-    const results = await Promise.race([
-      yf.search(symbol, { newsCount: 6 }),
-      new Promise<null>((_, reject) => setTimeout(() => reject(new Error("timeout")), 4000)),
-    ]) as Record<string, unknown> | null;
+    const results = await withTimeout(
+      getYahooClient().search(symbol, { newsCount: 6 }),
+      4000
+    ) as Record<string, unknown> | null;
 
     const rawNews = results?.news as Array<Record<string, unknown>> | undefined;
     if (rawNews && rawNews.length > 0) {
@@ -74,8 +70,8 @@ export async function GET(request: NextRequest) {
       }));
       return NextResponse.json({ news, live: true });
     }
-  } catch {
-    // fall through to fallback
+  } catch (err) {
+    console.warn(`[news] Yahoo search failed for ${symbol}:`, err);
   }
 
   return NextResponse.json({ news: FALLBACK_NEWS, live: false });
