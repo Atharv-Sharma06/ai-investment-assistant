@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getDemoData } from "@/lib/demoData";
-import { getChartPrice } from "@/lib/yahoo";
+import { fetchHistory } from "@/lib/marketData";
 
 export const runtime = "nodejs";
 
@@ -8,9 +8,19 @@ const TICKERS = ["NVDA", "MSFT", "AAPL", "META", "GOOGL", "AMZN", "TSLA", "SPY",
 
 async function getLiveQuote(symbol: string): Promise<{ price: number; change: number } | null> {
   try {
-    // Uses the chart endpoint, which (unlike quote()) doesn't need Yahoo's
-    // cookie/crumb handshake that is often blocked on serverless hosts.
-    return await getChartPrice(symbol, 4000);
+    // Price history (Yahoo chart, with non-Yahoo fallbacks) instead of quote(),
+    // which needs a cookie/crumb handshake that is often blocked on serverless
+    // hosts. Keyed sources are skipped so 10 tickers don't burn the API quota.
+    const { result, errors } = await fetchHistory(symbol, 10, "1d", { allowKeyed: false });
+    if (!result) {
+      console.warn(`[dashboard] live price failed for ${symbol}:`, errors.join(" | "));
+      return null;
+    }
+    const h = result.historical;
+    const metaPrice = result.meta["regularMarketPrice"];
+    const price = typeof metaPrice === "number" ? metaPrice : h[h.length - 1].close;
+    const prev = h.length >= 2 ? h[h.length - 2].close : price;
+    return { price, change: prev ? ((price - prev) / prev) * 100 : 0 };
   } catch (err) {
     console.warn(`[dashboard] live price failed for ${symbol}:`, err);
     return null;

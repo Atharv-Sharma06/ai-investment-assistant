@@ -125,7 +125,7 @@ function Skeleton({ h }: { h: number }) {
 }
 
 /* ── Demo banner ─────────────────────────────────────────────────────────── */
-function DemoBanner() {
+function DemoBanner({ reason }: { reason?: string }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: -12 }}
@@ -134,8 +134,9 @@ function DemoBanner() {
     >
       <span className="text-base">⚠️</span>
       <div>
-        <p className="text-sm font-semibold text-yellow-300">Demo mode — Yahoo Finance is currently unreachable</p>
+        <p className="text-sm font-semibold text-yellow-300">Demo mode — live market data is currently unreachable</p>
         <p className="text-xs text-yellow-600 mt-0.5">Showing simulated data so you can explore all features. Real data will load when the connection is restored.</p>
+        {reason && <p className="text-[10px] text-yellow-700/80 mt-1 break-all">Details: {reason}</p>}
       </div>
     </motion.div>
   );
@@ -356,7 +357,7 @@ export default function Home() {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.35 }}
             >
-              {data.demo && <DemoBanner />}
+              {data.demo && <DemoBanner reason={data.demoReason} />}
 
               {/* Divider */}
               <div className="flex items-center gap-4 mb-8">

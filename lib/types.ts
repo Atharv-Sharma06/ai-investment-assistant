@@ -58,6 +58,8 @@ export interface StockData {
   metrics: StockMetrics;
   insights: AIInsight;
   demo?: boolean;
+  demoReason?: string;
+  source?: string;
 }
 
 export type TimeRange = "1M" | "3M" | "6M" | "1Y" | "2Y" | "5Y";
