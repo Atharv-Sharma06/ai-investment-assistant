@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { calculateMetrics, generateInsights } from "@/lib/calculations";
 import { getDemoData } from "@/lib/demoData";
 import { HistoricalDataPoint, StockQuote } from "@/lib/types";
+import { getYahooClient, withTimeout } from "@/lib/yahoo";
 
 export const runtime = "nodejs";
 
@@ -25,45 +26,34 @@ async function fetchFromYahoo(
   range: string
 ): Promise<{ quote: StockQuote; historical: HistoricalDataPoint[]; demo: false } | null> {
   try {
-    // Lazy-require so a module load failure doesn't crash the whole route
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { default: YahooFinance } = require("yahoo-finance2");
-    const yf: {
-      quote: (s: string) => Promise<Record<string, unknown>>;
-      chart: (s: string, o: Record<string, unknown>) => Promise<{ quotes: Record<string, unknown>[] }>;
-    } = new YahooFinance({ suppressNotices: ["yahooSurvey", "ripHistorical"] });
-
+    const yf = getYahooClient();
     const config = RANGE_MAP[range] ?? RANGE_MAP["1Y"];
 
-    const [quoteResult, chartResult] = await Promise.all([
-      yf.quote(symbol),
-      yf.chart(symbol, { period1: subDays(config.days), interval: config.interval }),
+    // chart() needs no crumb and is the source of truth; quote() needs Yahoo's
+    // cookie/crumb handshake, which is often blocked on serverless hosts, so a
+    // quote failure must not throw away the chart data.
+    const [chartRes, quoteRes] = await Promise.allSettled([
+      withTimeout(yf.chart(symbol, { period1: subDays(config.days), interval: config.interval }), 8000),
+      withTimeout(yf.quote(symbol), 5000),
     ]);
 
-    const rawQuotes = chartResult?.quotes ?? [];
-    if (!quoteResult || rawQuotes.length === 0) return null;
+    if (chartRes.status === "rejected") {
+      console.error(`[stock] Yahoo chart failed for ${symbol}:`, chartRes.reason);
+      return null;
+    }
+    if (quoteRes.status === "rejected") {
+      console.warn(`[stock] Yahoo quote failed for ${symbol}, using chart metadata:`, quoteRes.reason);
+    }
 
-    const q = quoteResult as Record<string, unknown>;
-    const n = (f: string, fb = 0) => (typeof q[f] === "number" ? (q[f] as number) : fb);
-    const s = (f: string): string | null => (typeof q[f] === "string" ? (q[f] as string) : null);
+    const rawQuotes = chartRes.value?.quotes ?? [];
+    if (rawQuotes.length === 0) return null;
 
-    const quote: StockQuote = {
-      symbol:                    s("symbol")      ?? symbol,
-      shortName:                 s("shortName")   ?? s("longName") ?? symbol,
-      regularMarketPrice:        n("regularMarketPrice"),
-      regularMarketChange:       n("regularMarketChange"),
-      regularMarketChangePercent:n("regularMarketChangePercent"),
-      regularMarketVolume:       n("regularMarketVolume"),
-      marketCap:                 n("marketCap"),
-      fiftyTwoWeekHigh:          n("fiftyTwoWeekHigh"),
-      fiftyTwoWeekLow:           n("fiftyTwoWeekLow"),
-      averageVolume:             n("averageVolume"),
-      trailingPE:   typeof q["trailingPE"]   === "number" ? (q["trailingPE"]   as number) : null,
-      forwardPE:    typeof q["forwardPE"]    === "number" ? (q["forwardPE"]    as number) : null,
-      dividendYield:typeof q["dividendYield"]=== "number" ? (q["dividendYield"]as number) : null,
-      sector:   s("sector"),
-      industry: s("industry"),
-    };
+    const meta = (chartRes.value?.meta ?? {}) as Record<string, unknown>;
+    const q = (quoteRes.status === "fulfilled" && quoteRes.value ? quoteRes.value : {}) as Record<string, unknown>;
+    const pick = (f: string): unknown => (q[f] ?? meta[f]);
+    const n = (f: string, fb = 0) => { const v = pick(f); return typeof v === "number" ? v : fb; };
+    const s = (f: string): string | null => { const v = pick(f); return typeof v === "string" ? v : null; };
+    const opt = (f: string): number | null => (typeof q[f] === "number" ? (q[f] as number) : null);
 
     const historical: HistoricalDataPoint[] = rawQuotes
       .filter((d) => d["close"] != null)
@@ -84,9 +74,47 @@ async function fetchFromYahoo(
           adjClose: num("adjclose", close),
         };
       });
+    if (historical.length === 0) return null;
+
+    const lastClose = historical[historical.length - 1].close;
+    const price = n("regularMarketPrice", lastClose);
+
+    // Derive change fields from history when quote() is unavailable.
+    let change = opt("regularMarketChange");
+    let changePct = opt("regularMarketChangePercent");
+    if (change === null || changePct === null) {
+      const prev = typeof meta["previousClose"] === "number"
+        ? (meta["previousClose"] as number)
+        : historical.length >= 2 ? historical[historical.length - 2].close : price;
+      change = price - prev;
+      changePct = prev ? (change / prev) * 100 : 0;
+    }
+
+    const recent = historical.slice(-60);
+    const avgVolume = recent.reduce((sum, d) => sum + d.volume, 0) / (recent.length || 1);
+    const closes = historical.map((d) => d.close);
+
+    const quote: StockQuote = {
+      symbol:                    s("symbol")      ?? symbol,
+      shortName:                 s("shortName")   ?? s("longName") ?? symbol,
+      regularMarketPrice:        price,
+      regularMarketChange:       change,
+      regularMarketChangePercent:changePct,
+      regularMarketVolume:       n("regularMarketVolume", historical[historical.length - 1].volume),
+      marketCap:                 n("marketCap"),
+      fiftyTwoWeekHigh:          n("fiftyTwoWeekHigh", Math.max(...closes)),
+      fiftyTwoWeekLow:           n("fiftyTwoWeekLow", Math.min(...closes)),
+      averageVolume:             n("averageVolume", avgVolume),
+      trailingPE:   opt("trailingPE"),
+      forwardPE:    opt("forwardPE"),
+      dividendYield:opt("dividendYield"),
+      sector:   s("sector"),
+      industry: s("industry"),
+    };
 
     return { quote, historical, demo: false };
-  } catch {
+  } catch (err) {
+    console.error(`[stock] Yahoo fetch failed for ${symbol}:`, err);
     return null;
   }
 }

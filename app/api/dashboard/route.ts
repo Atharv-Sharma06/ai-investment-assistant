@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getDemoData } from "@/lib/demoData";
+import { getChartPrice } from "@/lib/yahoo";
 
 export const runtime = "nodejs";
 
@@ -7,22 +8,11 @@ const TICKERS = ["NVDA", "MSFT", "AAPL", "META", "GOOGL", "AMZN", "TSLA", "SPY",
 
 async function getLiveQuote(symbol: string): Promise<{ price: number; change: number } | null> {
   try {
-    const { default: YahooFinance } = require("yahoo-finance2");
-    const yf: { quote: (sym: string) => Promise<Record<string, unknown>> } = new YahooFinance({
-      suppressNotices: ["yahooSurvey", "ripHistorical"],
-    });
-    const q = await Promise.race([
-      yf.quote(symbol),
-      new Promise<null>((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
-    ]);
-    if (q && typeof q === "object" && "regularMarketPrice" in q) {
-      return {
-        price: q.regularMarketPrice as number,
-        change: (q.regularMarketChangePercent as number) ?? 0,
-      };
-    }
-    return null;
-  } catch {
+    // Uses the chart endpoint, which (unlike quote()) doesn't need Yahoo's
+    // cookie/crumb handshake that is often blocked on serverless hosts.
+    return await getChartPrice(symbol, 4000);
+  } catch (err) {
+    console.warn(`[dashboard] live price failed for ${symbol}:`, err);
     return null;
   }
 }
