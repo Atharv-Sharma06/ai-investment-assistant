@@ -100,8 +100,8 @@ async function fromYahooDirect(symbol: string, period1: Date, interval: Interval
 
 /* ── 3. Twelve Data (free API key: https://twelvedata.com) ─────────────── */
 async function fromTwelveData(symbol: string, days: number, interval: Interval): Promise<HistoryResult> {
-  const key = process.env.TWELVE_DATA_API_KEY;
-  if (!key) throw new Error("TWELVE_DATA_API_KEY not set");
+  const key = process.env.TWELVE_DATA_API_KEY?.trim();
+  if (!key) throw new Error("TWELVE_DATA_API_KEY not set on this deploy");
   const outputsize = Math.min(5000, interval === "1wk" ? Math.ceil(days / 7) + 2 : Math.ceil(days * 0.7) + 5);
   const url =
     `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}` +
@@ -200,7 +200,9 @@ export async function fetchHistory(
   if (hit?.result) return { result: hit.result, errors };
 
   // Keyed source last, so its daily quota is only spent when needed.
-  if (allowKeyed && process.env.TWELVE_DATA_API_KEY) {
+  if (allowKeyed) {
+    // Runs even without a key so "TWELVE_DATA_API_KEY not set" shows up in the
+    // error list (fromTwelveData throws immediately in that case).
     const td = await attempt("twelvedata", () => fromTwelveData(symbol, days, interval));
     if (td.result) return { result: td.result, errors };
     if (td.error) errors.push(td.error);
