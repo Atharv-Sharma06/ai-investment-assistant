@@ -3,6 +3,7 @@ import { calculateMetrics, generateInsights } from "@/lib/calculations";
 import { getDemoData } from "@/lib/demoData";
 import { HistoricalDataPoint, StockQuote } from "@/lib/types";
 import { getYahooClient, withTimeout } from "@/lib/yahoo";
+import { fetchHistory, Interval } from "@/lib/marketData";
 
 export const runtime = "nodejs";
 
@@ -15,66 +16,35 @@ const RANGE_MAP: Record<string, { days: number; interval: string }> = {
   "5Y": { days: 1825, interval: "1wk" },
 };
 
-function subDays(days: number) {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return d;
-}
-
-async function fetchFromYahoo(
+async function fetchLive(
   symbol: string,
   range: string
-): Promise<{ quote: StockQuote; historical: HistoricalDataPoint[]; demo: false } | null> {
+): Promise<{ data: { quote: StockQuote; historical: HistoricalDataPoint[]; source: string } | null; errors: string[] }> {
   try {
-    const yf = getYahooClient();
     const config = RANGE_MAP[range] ?? RANGE_MAP["1Y"];
 
-    // chart() needs no crumb and is the source of truth; quote() needs Yahoo's
-    // cookie/crumb handshake, which is often blocked on serverless hosts, so a
-    // quote failure must not throw away the chart data.
-    const [chartRes, quoteRes] = await Promise.allSettled([
-      withTimeout(yf.chart(symbol, { period1: subDays(config.days), interval: config.interval }), 8000),
-      withTimeout(yf.quote(symbol), 5000),
+    // Price history is the source of truth (with non-Yahoo fallbacks). quote()
+    // needs Yahoo's cookie/crumb handshake, which is often blocked on serverless
+    // hosts, so it's optional enrichment only.
+    const [history, quoteRes] = await Promise.all([
+      fetchHistory(symbol, config.days, config.interval as Interval),
+      withTimeout(getYahooClient().quote(symbol), 5000).then(
+        (v) => v,
+        (err) => { console.warn(`[stock] Yahoo quote failed for ${symbol}:`, err); return null; }
+      ),
     ]);
 
-    if (chartRes.status === "rejected") {
-      console.error(`[stock] Yahoo chart failed for ${symbol}:`, chartRes.reason);
-      return null;
+    if (history.errors.length) {
+      console.warn(`[stock] data source errors for ${symbol}:`, history.errors.join(" | "));
     }
-    if (quoteRes.status === "rejected") {
-      console.warn(`[stock] Yahoo quote failed for ${symbol}, using chart metadata:`, quoteRes.reason);
-    }
+    if (!history.result) return { data: null, errors: history.errors };
 
-    const rawQuotes = chartRes.value?.quotes ?? [];
-    if (rawQuotes.length === 0) return null;
-
-    const meta = (chartRes.value?.meta ?? {}) as Record<string, unknown>;
-    const q = (quoteRes.status === "fulfilled" && quoteRes.value ? quoteRes.value : {}) as Record<string, unknown>;
+    const { historical, meta, source } = history.result;
+    const q = (quoteRes ?? {}) as Record<string, unknown>;
     const pick = (f: string): unknown => (q[f] ?? meta[f]);
     const n = (f: string, fb = 0) => { const v = pick(f); return typeof v === "number" ? v : fb; };
     const s = (f: string): string | null => { const v = pick(f); return typeof v === "string" ? v : null; };
     const opt = (f: string): number | null => (typeof q[f] === "number" ? (q[f] as number) : null);
-
-    const historical: HistoricalDataPoint[] = rawQuotes
-      .filter((d) => d["close"] != null)
-      .map((d) => {
-        const num = (f: string, fb = 0) => (typeof d[f] === "number" ? (d[f] as number) : fb);
-        const close = num("close");
-        const dateVal = d["date"];
-        const dateStr = dateVal instanceof Date
-          ? dateVal.toISOString().split("T")[0]
-          : String(dateVal).split("T")[0];
-        return {
-          date: dateStr,
-          open: num("open", close),
-          high: num("high", close),
-          low:  num("low",  close),
-          close,
-          volume:   num("volume"),
-          adjClose: num("adjclose", close),
-        };
-      });
-    if (historical.length === 0) return null;
 
     const lastClose = historical[historical.length - 1].close;
     const price = n("regularMarketPrice", lastClose);
@@ -112,10 +82,10 @@ async function fetchFromYahoo(
       industry: s("industry"),
     };
 
-    return { quote, historical, demo: false };
+    return { data: { quote, historical, source }, errors: history.errors };
   } catch (err) {
-    console.error(`[stock] Yahoo fetch failed for ${symbol}:`, err);
-    return null;
+    console.error(`[stock] live fetch failed for ${symbol}:`, err);
+    return { data: null, errors: [String(err)] };
   }
 }
 
@@ -128,8 +98,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Symbol is required" }, { status: 400 });
   }
 
-  // Try live Yahoo Finance first
-  const live = await fetchFromYahoo(symbol, range);
+  const { data: live, errors } = await fetchLive(symbol, range);
 
   if (live) {
     const metrics  = calculateMetrics(live.historical, live.quote.regularMarketPrice);
@@ -137,7 +106,9 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ ...live, metrics, insights, demo: false });
   }
 
-  // Fallback: generate realistic demo data so the UI always works
+  // Fallback: generate realistic demo data so the UI always works. demoReason
+  // says why every live source failed, for debugging on the deployed site.
+  console.error(`[stock] all live sources failed for ${symbol}:`, errors.join(" | "));
   const demo = getDemoData(symbol, range);
-  return NextResponse.json({ ...demo, demo: true });
+  return NextResponse.json({ ...demo, demo: true, demoReason: errors.join(" | ") });
 }
