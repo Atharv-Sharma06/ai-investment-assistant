@@ -16,6 +16,7 @@ import MetricsPanel from "@/components/MetricsPanel";
 import AIInsights from "@/components/AIInsights";
 import RiskIndicator from "@/components/RiskIndicator";
 import WatchlistDrawer from "@/components/WatchlistDrawer";
+import TopPicks from "@/components/TopPicks";
 import { StockData, TimeRange } from "@/lib/types";
 import { prepareChartData } from "@/lib/calculations";
 
@@ -296,6 +297,8 @@ export default function Home() {
               </motion.div>
             )}
           </AnimatePresence>
+
+          <TopPicks onSelect={(sym) => handleSearch(sym, "1Y")} />
         </div>
 
         {/* Scroll cue */}

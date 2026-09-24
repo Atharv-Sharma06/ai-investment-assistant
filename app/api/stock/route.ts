@@ -91,7 +91,10 @@ async function fetchLive(
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const symbol = (searchParams.get("symbol") ?? "").toUpperCase().trim();
+  const rawSymbol = searchParams.get("symbol") ?? "";
+  // Keep only characters valid in tickers (e.g. BRK-B, RELIANCE.NS, ^GSPC,
+  // EURUSD=X) so stray whitespace/invisible characters can't break lookups.
+  const symbol = rawSymbol.toUpperCase().replace(/[^A-Z0-9.\-^=]/g, "");
   const range  = searchParams.get("range") ?? "1Y";
 
   if (!symbol) {
@@ -110,5 +113,14 @@ export async function GET(request: NextRequest) {
   // says why every live source failed, for debugging on the deployed site.
   console.error(`[stock] all live sources failed for ${symbol}:`, errors.join(" | "));
   const demo = getDemoData(symbol, range);
-  return NextResponse.json({ ...demo, demo: true, demoReason: errors.join(" | ") });
+  // Escape non-printable characters so invisible ones show up in the banner.
+  const received = JSON.stringify(rawSymbol).replace(
+    /[^\x20-\x7e]/g,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`
+  );
+  return NextResponse.json({
+    ...demo,
+    demo: true,
+    demoReason: `symbol ${JSON.stringify(symbol)} (received ${received}) — ${errors.join(" | ")}`,
+  });
 }
