@@ -31,6 +31,16 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// Include the start of the response body so the demo-mode details show the
+// provider's actual message (e.g. "symbol not found" vs "invalid api key").
+async function httpError(res: Response): Promise<Error> {
+  let body = "";
+  try {
+    body = (await res.text()).replace(/\s+/g, " ").trim();
+  } catch {}
+  return new Error(`HTTP ${res.status}${body ? ` ${body.slice(0, 160)}` : ""}`);
+}
+
 async function fetchWithTimeout(url: string, ms: number, init: RequestInit = {}): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
@@ -73,7 +83,7 @@ async function fromYahooDirect(symbol: string, period1: Date, interval: Interval
   const res = await fetchWithTimeout(url, SOURCE_TIMEOUT_MS, {
     headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw await httpError(res);
   const json = await res.json();
   const result = json?.chart?.result?.[0];
   if (!result) throw new Error(json?.chart?.error?.description ?? "empty chart result");
@@ -107,7 +117,7 @@ async function fromTwelveData(symbol: string, days: number, interval: Interval):
     `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}` +
     `&interval=${interval === "1wk" ? "1week" : "1day"}&outputsize=${outputsize}&apikey=${key}`;
   const res = await fetchWithTimeout(url, SOURCE_TIMEOUT_MS);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw await httpError(res);
   const json = await res.json();
   if (json?.status !== "ok" || !Array.isArray(json.values)) {
     throw new Error(json?.message ?? "unexpected response");
@@ -140,7 +150,7 @@ async function fromStooq(symbol: string, period1: Date, interval: Interval): Pro
     `https://stooq.com/q/d/l/?s=${symbol.toLowerCase().replace(/-/g, ".")}.us` +
     `&i=${interval === "1wk" ? "w" : "d"}&d1=${d1}&d2=${d2}`;
   const res = await fetchWithTimeout(url, SOURCE_TIMEOUT_MS, { headers: { "User-Agent": BROWSER_UA } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw await httpError(res);
   const text = (await res.text()).trim();
   const lines = text.split(/\r?\n/);
   if (!/^Date,Open,High,Low,Close/i.test(lines[0] ?? "")) {
