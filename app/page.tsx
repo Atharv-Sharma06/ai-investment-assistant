@@ -16,6 +16,7 @@ import MetricsPanel from "@/components/MetricsPanel";
 import AIInsights from "@/components/AIInsights";
 import RiskIndicator from "@/components/RiskIndicator";
 import WatchlistDrawer from "@/components/WatchlistDrawer";
+import TopPicks from "@/components/TopPicks";
 import { StockData, TimeRange } from "@/lib/types";
 import { prepareChartData } from "@/lib/calculations";
 
@@ -147,6 +148,7 @@ export default function Home() {
   const [data,           setData]          = useState<StockData | null>(null);
   const [loading,        setLoading]       = useState(false);
   const [error,          setError]         = useState<string | null>(null);
+  const [suggestions,    setSuggestions]   = useState<{ symbol: string; name: string }[]>([]);
   const [currentSymbol,  setCurrentSymbol] = useState("");
   const [selectedRange,  setSelectedRange] = useState<TimeRange>("1Y");
   const resultsRef = useRef<HTMLDivElement>(null);
@@ -167,6 +169,7 @@ export default function Home() {
   const handleSearch = useCallback(async (symbol: string, range: TimeRange) => {
     setLoading(true);
     setError(null);
+    setSuggestions([]);
     setCurrentSymbol(symbol);
     setSelectedRange(range);
     setData(null);
@@ -190,8 +193,9 @@ export default function Home() {
       }
 
       if (!res.ok) {
-        const msg = (json as { error?: string }).error;
-        setError(msg || `Could not find "${symbol}". Check the ticker and try again.`);
+        const body = json as { error?: string; suggestions?: { symbol: string; name: string }[] };
+        setError(body.error || `Could not find "${symbol}". Check the ticker and try again.`);
+        setSuggestions(body.suggestions ?? []);
         return;
       }
 
@@ -291,11 +295,30 @@ export default function Home() {
                 </svg>
                 <div>
                   <p className="text-sm font-semibold text-red-300">{error}</p>
-                  <p className="text-xs text-red-500/70 mt-1">Try: AAPL · TSLA · NVDA · MSFT · GOOGL · SPY</p>
+                  {suggestions.length > 0 ? (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-red-400/80">Did you mean:</span>
+                      {suggestions.map((sug) => (
+                        <button
+                          key={sug.symbol}
+                          type="button"
+                          onClick={() => handleSearch(sug.symbol, selectedRange)}
+                          className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-0.5 text-xs text-cyan-300 hover:bg-cyan-500/20"
+                        >
+                          <span className="font-bold">{sug.symbol}</span>
+                          <span className="text-cyan-500/80"> · {sug.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-red-500/70 mt-1">Try: AAPL · TSLA · NVDA · MSFT · GOOGL · SPY</p>
+                  )}
                 </div>
               </motion.div>
             )}
           </AnimatePresence>
+
+          <TopPicks onSelect={(sym) => handleSearch(sym, "1Y")} />
         </div>
 
         {/* Scroll cue */}

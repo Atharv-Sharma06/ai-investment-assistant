@@ -6,6 +6,7 @@
 //   - Yahoo chart API, direct fetch (query1.finance.yahoo.com)
 //   - Stooq CSV                     (no key, US tickers only)
 //   - Twelve Data                   (only if TWELVE_DATA_API_KEY is set)
+// They run in parallel; see fetchHistory.
 // Every failure reason is collected so the caller can log/report it.
 
 import { HistoricalDataPoint } from "./types";
@@ -29,6 +30,16 @@ const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFin
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// Include the start of the response body so the demo-mode details show the
+// provider's actual message (e.g. "symbol not found" vs "invalid api key").
+async function httpError(res: Response): Promise<Error> {
+  let body = "";
+  try {
+    body = (await res.text()).replace(/\s+/g, " ").trim();
+  } catch {}
+  return new Error(`HTTP ${res.status}${body ? ` ${body.slice(0, 160)}` : ""}`);
 }
 
 async function fetchWithTimeout(url: string, ms: number, init: RequestInit = {}): Promise<Response> {
@@ -73,7 +84,7 @@ async function fromYahooDirect(symbol: string, period1: Date, interval: Interval
   const res = await fetchWithTimeout(url, SOURCE_TIMEOUT_MS, {
     headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw await httpError(res);
   const json = await res.json();
   const result = json?.chart?.result?.[0];
   if (!result) throw new Error(json?.chart?.error?.description ?? "empty chart result");
@@ -100,14 +111,14 @@ async function fromYahooDirect(symbol: string, period1: Date, interval: Interval
 
 /* ── 3. Twelve Data (free API key: https://twelvedata.com) ─────────────── */
 async function fromTwelveData(symbol: string, days: number, interval: Interval): Promise<HistoryResult> {
-  const key = process.env.TWELVE_DATA_API_KEY;
-  if (!key) throw new Error("TWELVE_DATA_API_KEY not set");
+  const key = process.env.TWELVE_DATA_API_KEY?.trim();
+  if (!key) throw new Error("TWELVE_DATA_API_KEY not set on this deploy");
   const outputsize = Math.min(5000, interval === "1wk" ? Math.ceil(days / 7) + 2 : Math.ceil(days * 0.7) + 5);
   const url =
     `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}` +
     `&interval=${interval === "1wk" ? "1week" : "1day"}&outputsize=${outputsize}&apikey=${key}`;
   const res = await fetchWithTimeout(url, SOURCE_TIMEOUT_MS);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw await httpError(res);
   const json = await res.json();
   if (json?.status !== "ok" || !Array.isArray(json.values)) {
     throw new Error(json?.message ?? "unexpected response");
@@ -140,7 +151,7 @@ async function fromStooq(symbol: string, period1: Date, interval: Interval): Pro
     `https://stooq.com/q/d/l/?s=${symbol.toLowerCase().replace(/-/g, ".")}.us` +
     `&i=${interval === "1wk" ? "w" : "d"}&d1=${d1}&d2=${d2}`;
   const res = await fetchWithTimeout(url, SOURCE_TIMEOUT_MS, { headers: { "User-Agent": BROWSER_UA } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw await httpError(res);
   const text = (await res.text()).trim();
   const lines = text.split(/\r?\n/);
   if (!/^Date,Open,High,Low,Close/i.test(lines[0] ?? "")) {
@@ -188,22 +199,25 @@ export async function fetchHistory(
   const period1 = new Date();
   period1.setDate(period1.getDate() - days);
 
-  // Free, keyless sources run in parallel (Netlify functions time out at 10s);
-  // the first one in priority order that returns data wins.
-  const free = await Promise.all([
+  // All sources run in parallel (Netlify functions time out at 10s, and the
+  // stock route may still need time for ticker suggestions); the first one in
+  // priority order that returns data wins. Twelve Data fails immediately
+  // without a key, which reports "TWELVE_DATA_API_KEY not set" in the errors.
+  const attempts = await Promise.all([
     attempt("yahoo", () => fromYahooLib(symbol, period1, interval)),
     attempt("yahoo-direct", () => fromYahooDirect(symbol, period1, interval)),
     attempt("stooq", () => fromStooq(symbol, period1, interval)),
+    ...(allowKeyed ? [attempt("twelvedata", () => fromTwelveData(symbol, days, interval))] : []),
   ]);
-  const errors = free.flatMap((r) => (r.error ? [r.error] : []));
-  const hit = free.find((r) => r.result);
+  const errors = attempts.flatMap((r) => (r.error ? [r.error] : []));
+  const hit = attempts.find((r) => r.result);
   if (hit?.result) return { result: hit.result, errors };
-
-  // Keyed source last, so its daily quota is only spent when needed.
-  if (allowKeyed && process.env.TWELVE_DATA_API_KEY) {
-    const td = await attempt("twelvedata", () => fromTwelveData(symbol, days, interval));
-    if (td.result) return { result: td.result, errors };
-    if (td.error) errors.push(td.error);
-  }
   return { result: null, errors };
+}
+
+// True when a provider that is actually reachable says the symbol doesn't
+// exist, as opposed to being blocked/unreachable. Twelve Data is the reliable
+// signal: Yahoo returns the same "No data found" 404 when it blocks a server.
+export function isUnknownSymbol(errors: string[]): boolean {
+  return errors.some((e) => e.startsWith("twelvedata: HTTP 404") || /^twelvedata: .*symbol.*(invalid|not found)/i.test(e));
 }
