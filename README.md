@@ -20,6 +20,17 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Environment variables
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | No | GPT-4o mini analysis. Without it the rule-based engine is used. |
+| `TWELVE_DATA_API_KEY` | Recommended for hosted deploys | Market data fallback ([free key](https://twelvedata.com), 8 requests/min, 800/day). Yahoo Finance and Stooq usually block cloud hosts such as Netlify, so without this key the deployed app falls back to demo data. |
+
+Price history is fetched from Yahoo Finance, Stooq and Twelve Data in parallel, and the first source that returns data is used (`lib/marketData.ts`). When every source fails, the demo banner's **Details** line lists each source's error.
+
+On Netlify, set these under **Project configuration → Environment variables**, then redeploy.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
