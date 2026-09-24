@@ -6,6 +6,7 @@
 //   - Yahoo chart API, direct fetch (query1.finance.yahoo.com)
 //   - Stooq CSV                     (no key, US tickers only)
 //   - Twelve Data                   (only if TWELVE_DATA_API_KEY is set)
+// They run in parallel; see fetchHistory.
 // Every failure reason is collected so the caller can log/report it.
 
 import { HistoricalDataPoint } from "./types";
@@ -198,24 +199,25 @@ export async function fetchHistory(
   const period1 = new Date();
   period1.setDate(period1.getDate() - days);
 
-  // Free, keyless sources run in parallel (Netlify functions time out at 10s);
-  // the first one in priority order that returns data wins.
-  const free = await Promise.all([
+  // All sources run in parallel (Netlify functions time out at 10s, and the
+  // stock route may still need time for ticker suggestions); the first one in
+  // priority order that returns data wins. Twelve Data fails immediately
+  // without a key, which reports "TWELVE_DATA_API_KEY not set" in the errors.
+  const attempts = await Promise.all([
     attempt("yahoo", () => fromYahooLib(symbol, period1, interval)),
     attempt("yahoo-direct", () => fromYahooDirect(symbol, period1, interval)),
     attempt("stooq", () => fromStooq(symbol, period1, interval)),
+    ...(allowKeyed ? [attempt("twelvedata", () => fromTwelveData(symbol, days, interval))] : []),
   ]);
-  const errors = free.flatMap((r) => (r.error ? [r.error] : []));
-  const hit = free.find((r) => r.result);
+  const errors = attempts.flatMap((r) => (r.error ? [r.error] : []));
+  const hit = attempts.find((r) => r.result);
   if (hit?.result) return { result: hit.result, errors };
-
-  // Keyed source last, so its daily quota is only spent when needed.
-  if (allowKeyed) {
-    // Runs even without a key so "TWELVE_DATA_API_KEY not set" shows up in the
-    // error list (fromTwelveData throws immediately in that case).
-    const td = await attempt("twelvedata", () => fromTwelveData(symbol, days, interval));
-    if (td.result) return { result: td.result, errors };
-    if (td.error) errors.push(td.error);
-  }
   return { result: null, errors };
+}
+
+// True when a provider that is actually reachable says the symbol doesn't
+// exist, as opposed to being blocked/unreachable. Twelve Data is the reliable
+// signal: Yahoo returns the same "No data found" 404 when it blocks a server.
+export function isUnknownSymbol(errors: string[]): boolean {
+  return errors.some((e) => e.startsWith("twelvedata: HTTP 404") || /^twelvedata: .*symbol.*(invalid|not found)/i.test(e));
 }

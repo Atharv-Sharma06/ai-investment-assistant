@@ -3,7 +3,8 @@ import { calculateMetrics, generateInsights } from "@/lib/calculations";
 import { getDemoData } from "@/lib/demoData";
 import { HistoricalDataPoint, StockQuote } from "@/lib/types";
 import { getYahooClient, withTimeout } from "@/lib/yahoo";
-import { fetchHistory, Interval } from "@/lib/marketData";
+import { fetchHistory, Interval, isUnknownSymbol } from "@/lib/marketData";
+import { suggestSymbols } from "@/lib/symbolSearch";
 
 export const runtime = "nodejs";
 
@@ -107,6 +108,16 @@ export async function GET(request: NextRequest) {
     const metrics  = calculateMetrics(live.historical, live.quote.regularMarketPrice);
     const insights = generateInsights(metrics, symbol);
     return NextResponse.json({ ...live, metrics, insights, demo: false });
+  }
+
+  // The ticker doesn't exist (or is a company name): say so, with suggestions,
+  // instead of showing demo data as if the connection were down.
+  if (isUnknownSymbol(errors)) {
+    const suggestions = await suggestSymbols(symbol);
+    return NextResponse.json(
+      { error: `No stock found for "${symbol}". Check the ticker symbol.`, suggestions },
+      { status: 404 }
+    );
   }
 
   // Fallback: generate realistic demo data so the UI always works. demoReason
